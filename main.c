@@ -3,11 +3,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/event.h>
 #include <unistd.h>
 
 #define PORT "80"
 
-const char *INDEX_HTML = "<html lang=\"en\"><head><title>Hello from C</title></head><body><h1>Hello, World!</h1><p>Greetings from C</p></body></html>";
+const char *INDEX_HTML = "<html lang=\"en\"><head><title>Hello from C</title></head><body><h1>Hello, "
+                         "World!</h1><p>Greetings from C</p></body></html>";
 
 int sock_fd = -1;
 
@@ -37,9 +39,7 @@ int charray_append(charray *arr, const char c) {
     return 0;
 }
 
-void charray_reset(charray *arr) {
-    arr->len = 0;
-}
+void charray_reset(charray *arr) { arr->len = 0; }
 
 void charray_destroy(charray *arr) {
     free(arr->buf);
@@ -50,13 +50,8 @@ void charray_destroy(charray *arr) {
 
 /* function definitions */
 
-static void send_response(
-    const int client_fd,
-    const int status,
-    const char *status_text,
-    const char *content_type,
-    const char *body
-);
+static void send_response(const int client_fd, const int status, const char *status_text, const char *content_type,
+                          const char *body);
 
 static void handle_sigint(const int sig);
 
@@ -69,6 +64,11 @@ int main(void) {
     struct sockaddr_storage client_addr;
     socklen_t client_addr_len = sizeof(struct sockaddr_storage);
     int status;
+    int kq, nev;
+
+    // TODO we need a dyn array for this
+    struct kevent monitored_events[1];
+    struct kevent events[1];
 
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_UNSPEC;
@@ -87,7 +87,7 @@ int main(void) {
         return EXIT_FAILURE;
     }
 
-    setsockopt(sock_fd, SOL_SOCKET, SO_REUSEADDR, &(int){1}, 1);
+    setsockopt(sock_fd, SOL_SOCKET, SO_REUSEADDR, &(int) {1}, 1);
 
     if (bind(sock_fd, servinfo->ai_addr, servinfo->ai_addrlen) == -1) {
         perror("bind");
@@ -99,58 +99,91 @@ int main(void) {
         return EXIT_FAILURE;
     }
 
+    // create event queue
+    if ((kq = kqueue()) == -1) {
+        perror("kqueue");
+        return EXIT_FAILURE;
+    }
+
+
     printf("listening on port %s\n", PORT);
 
-    // infinite loop
+    // TODO= infinite loop
+    // for (;;) {
+    // do for single request first, then add loops
+    const int client_fd = accept(sock_fd, (struct sockaddr *) &client_addr, &client_addr_len);
+    if (client_fd == -1) {
+        perror("accept");
+        return EXIT_FAILURE;
+    }
+
+    // TODO new event needs to be created and added to bag of events
+    EV_SET(&monitored_events[0], client_fd, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, 0);
+
+    // TODO work through events in (separate) loop
     for (;;) {
-        // TODO add kqueue
-        const int client_fd = accept(sock_fd, (struct sockaddr *)&client_addr, &client_addr_len);
-        if (client_fd == -1) {
-            perror("accept");
+        nev = kevent(kq, monitored_events, 1, events, 1, NULL);
+        if (nev < 0) {
+            perror("kevent");
             return EXIT_FAILURE;
+        }
+
+        if (nev == 0) continue;
+
+        if (events[0].flags & EV_EOF) {
+            printf("client closed connection");
+        }
+
+        if (events[0].flags & EV_ERROR) {
+            fprintf(stderr, "EV_ERROR: %s\n", strerror(events[0].data));
+            exit(EXIT_FAILURE);
         }
 
         /*
          * NOTE(mike): we completely ignore any actual client request params.
          * This application is purely about using kqueue for async I/O in a web server.
          */
+        if (events[0].ident == client_fd) {
+            send_response(client_fd, 200, "HTTP/1.1 200 OK", "text/html", INDEX_HTML);
 
-        send_response(client_fd, 200, "HTTP/1.1 200 OK", "text/html", INDEX_HTML);
+            shutdown(client_fd, SHUT_RDWR);
+            close(client_fd);
+            break;
+        }
 
-        shutdown(client_fd, SHUT_RDWR);
-        close(client_fd);
     }
+
+    // }
+
+    close(sock_fd);
+    close(kq);
+    return EXIT_SUCCESS;
 }
 
-static void send_response(
-    const int client_fd,
-    const int status,
-    const char *status_text,
-    const char *content_type,
-    const char *body
-) {
+static void send_response(const int client_fd, const int status, const char *status_text, const char *content_type,
+                          const char *body) {
     char header[512];
-    const size_t body_len = body?strlen(body): 0;
+    const size_t body_len = body ? strlen(body) : 0;
     int n = snprintf(header, sizeof(header),
-        "HTTP/1.1 %d %s\r\n"
-        "Server: mini-c/0.1\r\n"
-        "Content-Type: %s\r\n"
-        "Content-Length: %d\r\n"
-        "Connection: close\r\n"
-        "\r\n",
-        status, status_text, content_type, body_len);
+                     "HTTP/1.1 %d %s\r\n"
+                     "Server: mini-c/0.1\r\n"
+                     "Content-Type: %s\r\n"
+                     "Content-Length: %d\r\n"
+                     "Connection: close\r\n"
+                     "\r\n",
+                     status, status_text, content_type, body_len);
 
-    if (n <0 || n >= sizeof(header)) {
+    if (n < 0 || n >= sizeof(header)) {
         return;
     }
-    send(client_fd, header, (size_t)n, 0);
+    send(client_fd, header, (size_t) n, 0);
     if (body_len > 0) {
         send(client_fd, body, body_len, 0);
     }
 }
 
 static void handle_sigint(const int sig) {
-    (void)sig;
+    (void) sig;
     if (sock_fd != -1) {
         close(sock_fd);
     }
