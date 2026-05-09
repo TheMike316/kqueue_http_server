@@ -8,10 +8,13 @@
 
 #define PORT "80"
 
+#define MAX_EVENTS 10000
+
 const char *INDEX_HTML = "<html lang=\"en\"><head><title>Hello from C</title></head><body><h1>Hello, "
                          "World!</h1><p>Greetings from C</p></body></html>";
 
 int sock_fd = -1;
+int kq = -1;
 
 // maybe I want an init function just for api symmetry reasons; we'll see
 typedef struct {
@@ -64,11 +67,9 @@ int main(void) {
     struct sockaddr_storage client_addr;
     socklen_t client_addr_len = sizeof(struct sockaddr_storage);
     int status;
-    int kq, nev;
+    int nev;
 
-    // TODO we need a dyn array for this
-    struct kevent monitored_events[1];
-    struct kevent events[1];
+    struct kevent events[MAX_EVENTS] = {0};
 
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_UNSPEC;
@@ -108,52 +109,52 @@ int main(void) {
 
     printf("listening on port %s\n", PORT);
 
-    // TODO= infinite loop
-    // for (;;) {
-    // do for single request first, then add loops
-    const int client_fd = accept(sock_fd, (struct sockaddr *) &client_addr, &client_addr_len);
-    if (client_fd == -1) {
-        perror("accept");
-        return EXIT_FAILURE;
-    }
+    struct kevent accept_event = {};
+    EV_SET(&accept_event, sock_fd, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, 0);
+    kevent(kq, &accept_event, 1, NULL, 0, NULL);
 
-    // TODO new event needs to be created and added to bag of events
-    EV_SET(&monitored_events[0], client_fd, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, 0);
-
-    // TODO work through events in (separate) loop
     for (;;) {
-        nev = kevent(kq, monitored_events, 1, events, 1, NULL);
+        nev = kevent(kq, NULL, 0, events, MAX_EVENTS, NULL);
         if (nev < 0) {
             perror("kevent");
             return EXIT_FAILURE;
         }
-
         if (nev == 0) continue;
 
-        if (events[0].flags & EV_EOF) {
-            printf("client closed connection");
+        for (size_t i = 0; i < nev; ++i) {
+            if (events[i].flags & EV_EOF) {
+                if (events[i].ident == sock_fd) {
+                    printf("server socket closed??");
+                    break;
+                } else {
+                    close(events[i].ident);
+                }
+            }
+            // TODO error handling
+            if (events[i].flags & EV_ERROR) {
+                fprintf(stderr, "EV_ERROR: %s\n", strerror(events[i].data));
+                continue;
+            }
+
+            if (events[i].ident == sock_fd) {
+                const int client_fd = accept(sock_fd, (struct sockaddr *) &client_addr, &client_addr_len);
+                struct kevent client_event;
+                EV_SET(&client_event, client_fd, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, 0);
+                kevent(kq, &client_event, 1, NULL, 0, NULL);
+            } else {
+
+                /* NOTE(mike): we completely ignore any actual client request params.
+                 * This application is purely about using kqueue for async I/O in a web server.
+                 */
+
+                const int cfd = events[0].ident;
+                send_response(cfd, 200, "HTTP/1.1 200 OK", "text/html", INDEX_HTML);
+
+                shutdown(cfd, SHUT_RDWR);
+                close(cfd);
+            }
         }
-
-        if (events[0].flags & EV_ERROR) {
-            fprintf(stderr, "EV_ERROR: %s\n", strerror(events[0].data));
-            exit(EXIT_FAILURE);
-        }
-
-        /*
-         * NOTE(mike): we completely ignore any actual client request params.
-         * This application is purely about using kqueue for async I/O in a web server.
-         */
-        if (events[0].ident == client_fd) {
-            send_response(client_fd, 200, "HTTP/1.1 200 OK", "text/html", INDEX_HTML);
-
-            shutdown(client_fd, SHUT_RDWR);
-            close(client_fd);
-            break;
-        }
-
     }
-
-    // }
 
     close(sock_fd);
     close(kq);
@@ -186,6 +187,9 @@ static void handle_sigint(const int sig) {
     (void) sig;
     if (sock_fd != -1) {
         close(sock_fd);
+    }
+    if (kq != -1) {
+        close(kq);
     }
     write(STDOUT_FILENO, "\nShutting down.\n", 16);
     _exit(EXIT_SUCCESS);
