@@ -5,9 +5,10 @@
 #include <sys/socket.h>
 #include <sys/event.h>
 #include <unistd.h>
+#include <fcntl.h>
 
-#define PORT "80"
-
+#define PORT "6969"
+#define REQ_BUF 4097 // 4kb plus 0 terminator
 #define MAX_EVENTS 10000
 
 const char *INDEX_HTML = "<html lang=\"en\"><head><title>Hello from C</title></head><body><h1>Hello, "
@@ -68,6 +69,8 @@ int main(void) {
     socklen_t client_addr_len = sizeof(struct sockaddr_storage);
     int status;
     int nev;
+    char method[8], path[1024], version[16];
+    char request[REQ_BUF] = {0};
 
     struct kevent events[MAX_EVENTS] = {0};
 
@@ -95,7 +98,10 @@ int main(void) {
         return EXIT_FAILURE;
     }
 
-    if (listen(sock_fd, 10) == -1) {
+    int flags = fcntl(sock_fd, F_GETFL, 0);
+    fcntl(sock_fd, F_SETFL, flags | O_NONBLOCK);
+
+    if (listen(sock_fd, SOMAXCONN) == -1) {
         perror("listen");
         return EXIT_FAILURE;
     }
@@ -137,7 +143,18 @@ int main(void) {
             }
 
             if (events[i].ident == sock_fd) {
+                // TODO drain all client connections
                 const int client_fd = accept(sock_fd, (struct sockaddr *) &client_addr, &client_addr_len);
+
+                if (client_fd == -1) {
+                    // TODO client error handling
+                    perror("accept");
+                    return EXIT_FAILURE;
+                }
+
+                int flags = fcntl(client_fd, F_GETFL, 0);
+                fcntl(client_fd, F_SETFL, flags | O_NONBLOCK);
+
                 struct kevent client_event;
                 EV_SET(&client_event, client_fd, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, 0);
                 kevent(kq, &client_event, 1, NULL, 0, NULL);
@@ -147,11 +164,45 @@ int main(void) {
                  * This application is purely about using kqueue for async I/O in a web server.
                  */
 
-                const int cfd = events[0].ident;
-                send_response(cfd, 200, "HTTP/1.1 200 OK", "text/html", INDEX_HTML);
+                const int client_fd = events[0].ident;
 
-                shutdown(cfd, SHUT_RDWR);
-                close(cfd);
+                const ssize_t n = recv(client_fd, request, REQ_BUF, 0);
+                if (n <= 0) {
+                    close(client_fd);
+                    continue;
+                }
+                request[n] = '\0';
+
+                if (sscanf(request, "%7s %1023s %15s", method, path, version) != 3) {
+                    send_response(client_fd, 400, "Bad Request", "text/plain",
+                                  "Bad Request\n");
+                    close(client_fd);
+                    continue;
+                }
+
+                printf("Request received: Method: %s; Path: %s; version: %s\n", method, path, version);
+
+                // handle GET and HEAD for now
+                int is_head = 0;
+                if (strcmp(method, "GET") == 0) {
+                    is_head = 0;
+                } else if (strcmp(method, "HEAD") == 0) {
+                    is_head = 1;
+                } else {
+                    send_response(client_fd, 405, "Method Not Allowed", "text/plain",
+                                  "Only GET/HEAD supported\n");
+                    close(client_fd);
+                    continue;
+                }
+
+                if (is_head) {
+                    send_response(client_fd, 200, "HTTP/1.1 200 OK", "text/plain", "");
+                } else {
+                    send_response(client_fd, 200, "HTTP/1.1 200 OK", "text/html", INDEX_HTML);
+                }
+
+                shutdown(client_fd, SHUT_WR);
+                close(client_fd);
             }
         }
     }
