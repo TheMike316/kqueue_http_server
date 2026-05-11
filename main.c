@@ -195,7 +195,7 @@ int main(void) {
                     continue;
                 }
 
-                printf("Request received: Method: %s; Path: %s; version: %s\n", method, path, version);
+                // printf("Request received: Method: %s; Path: %s; version: %s\n", method, path, version);
 
                 // handle GET and HEAD for now
                 int is_head = 0;
