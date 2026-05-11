@@ -1,11 +1,12 @@
+#include <fcntl.h>
 #include <netdb.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
+#include <sys/errno.h>
 #include <sys/event.h>
+#include <sys/socket.h>
 #include <unistd.h>
-#include <fcntl.h>
 
 #define PORT "6969"
 #define REQ_BUF 4097 // 4kb plus 0 terminator
@@ -91,14 +92,16 @@ int main(void) {
         return EXIT_FAILURE;
     }
 
-    setsockopt(sock_fd, SOL_SOCKET, SO_REUSEADDR, &(int) {1}, 1);
+    int opt = 1;
+    setsockopt(sock_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof opt);
+    setsockopt(sock_fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof opt); // specifically for macos
 
     if (bind(sock_fd, servinfo->ai_addr, servinfo->ai_addrlen) == -1) {
         perror("bind");
         return EXIT_FAILURE;
     }
 
-    int flags = fcntl(sock_fd, F_GETFL, 0);
+    const int flags = fcntl(sock_fd, F_GETFL, 0);
     fcntl(sock_fd, F_SETFL, flags | O_NONBLOCK);
 
     if (listen(sock_fd, SOMAXCONN) == -1) {
@@ -146,7 +149,10 @@ int main(void) {
                 // TODO drain all client connections
                 const int client_fd = accept(sock_fd, (struct sockaddr *) &client_addr, &client_addr_len);
 
-                if (client_fd == -1) {
+                if (client_fd < 0) {
+                    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                        continue;
+                    }
                     // TODO client error handling
                     perror("accept");
                     return EXIT_FAILURE;
@@ -164,10 +170,19 @@ int main(void) {
                  * This application is purely about using kqueue for async I/O in a web server.
                  */
 
-                const int client_fd = events[0].ident;
+                const int client_fd = events[i].ident;
 
                 const ssize_t n = recv(client_fd, request, REQ_BUF, 0);
-                if (n <= 0) {
+                if (n < 0) {
+                    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                        printf("asdf\n");
+                        continue;
+                    } else {
+                        perror("recv");
+                        return EXIT_FAILURE;
+                    }
+                }
+                if (n == 0) {
                     close(client_fd);
                     continue;
                 }
