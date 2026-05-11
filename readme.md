@@ -1,5 +1,4 @@
-WIP: using kqueue with a stubbed http server that sends a hard-coded index.html regardless of request.
-<br>
-not quite working yet, still facing socket/fd issues. 
-<br>
-turns out if you think you have a general grasp of network programming, you're likely wrong.
+recreational http server stub using kqueue that sends a hard-coded index.html. <br>
+supports tens of thousands of roughly concurrent requests depending on hardware and os settings. <br>
+can be optimized.<br>
+code needs some cleaning up, especially in terms of error handling
